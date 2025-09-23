@@ -1,5 +1,6 @@
 import re
 import os
+from urllib.parse import quote_plus
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from langchain_core.prompts import ChatPromptTemplate
@@ -10,45 +11,22 @@ from langchain_deepseek import ChatDeepSeek
 import mysql.connector
 
 app = Flask(__name__)
-CORS(app)  # allow React to call API
+CORS(app)
 
-# DeepSeek API key
 os.environ['DEEPSEEK_API_KEY'] = 'sk-86d752d376a64028929d2511e90dde3b'
 
-# Connect to database
-db_url = "mysql+mysqlconnector://root:Iphone5541%40123@localhost:3306/Chinook"
-db = None
-try:
-    db = SQLDatabase.from_uri(db_url)
-    print("Database connected")
-except Exception as e:
-    print(f"DB connection error: {e}")
-
-def get_schema(_):
-    return db.get_table_info() if db else "Database connection failed."
-
-def run_query(query):
-    try:
-        conn = mysql.connector.connect(
-            host="localhost",
-            user="root",
-            password="Iphone5541@123",
-            database="Chinook"
-        )
-        cursor = conn.cursor(dictionary=True)
-        cursor.execute(query)
-        result = cursor.fetchall()
-        cursor.close()
-        conn.close()
-        return result
-    except Exception as e:
-        return f"Error running query: {e}"
+# Store current database connection and info
+current_db = {
+    "conn": None,
+    "db_info": None,
+    "sql_db": None  # For LangChain schema
+}
 
 def parse_sql_query(query_text):
     match = re.search(r"```sql(.*?)```", query_text, re.DOTALL)
     return match.group(1).strip() if match else query_text.strip()
 
-# LangChain LLM
+# LLM
 llm = ChatDeepSeek(model="deepseek-chat", timeout=60)
 
 sql_prompt_template = """
@@ -61,8 +39,7 @@ Question: {question}
 SQL Query:
 """
 sql_prompt = ChatPromptTemplate.from_template(sql_prompt_template)
-
-sql_chain = RunnablePassthrough.assign(schema=get_schema) | sql_prompt | llm.bind(stop=["\nSQL Result:"]) | StrOutputParser()
+sql_chain = RunnablePassthrough() | sql_prompt | llm.bind(stop=["\nSQL Result:"]) | StrOutputParser()
 
 answer_prompt_template = """
 Based on the table schema below, question, sql query, and sql response, write a natural language answer:
@@ -74,37 +51,89 @@ SQL Response: {response}
 """
 answer_prompt = ChatPromptTemplate.from_template(answer_prompt_template)
 
+# ---------------- Connect / Disconnect ----------------
+
+@app.route("/connect", methods=["POST"])
+def connect_db():
+    data = request.json
+    host = data.get("host")
+    user = data.get("user")
+    password = data.get("password")
+    database = data.get("database")
+
+    if not all([host, user, password, database]):
+        return jsonify({"error": "All fields are required"}), 400
+
+    try:
+        # MySQL connection
+        conn = mysql.connector.connect(
+            host=host,
+            user=user,
+            password=password,
+            database=database
+        )
+        current_db["conn"] = conn
+        current_db["db_info"] = data
+
+        # URL-encode password for LangChain SQLDatabase
+        password_encoded = quote_plus(password)
+        db_uri = f"mysql+mysqlconnector://{user}:{password_encoded}@{host}:3306/{database}"
+        current_db["sql_db"] = SQLDatabase.from_uri(db_uri)
+
+        return jsonify({"message": f"Connected to database {database}"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/disconnect", methods=["POST"])
+def disconnect_db():
+    try:
+        if current_db["conn"]:
+            current_db["conn"].close()
+            db_name = current_db["db_info"]["database"]
+            current_db["conn"] = None
+            current_db["db_info"] = None
+            current_db["sql_db"] = None
+            return jsonify({"message": f"Disconnected from database {db_name}"})
+        else:
+            return jsonify({"error": "No active database connection"}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# ---------------- Ask Question ----------------
+
 @app.route("/ask", methods=["POST"])
 def ask():
     data = request.json
     question = data.get("question")
+
     if not question:
-        return jsonify({"error": "No question provided"}), 400
+        return jsonify({"error": "Missing question"}), 400
+
+    if not current_db["conn"] or not current_db["sql_db"]:
+        return jsonify({"error": "No database connected"}), 400
 
     try:
-        # Step 1: Generate SQL
-        sql_query = sql_chain.invoke({"question": question})
+        # Step 1: Generate SQL using LangChain
+        sql_query = sql_chain.invoke({"question": question, "schema": current_db["sql_db"].get_table_info()})
         parsed_query = parse_sql_query(sql_query)
 
-        # Step 2: Run SQL
-        sql_result = run_query(parsed_query)
-        if isinstance(sql_result, str):
-            return jsonify({"error": sql_result}), 500
+        # Step 2: Execute SQL
+        cursor = current_db["conn"].cursor(dictionary=True)
+        cursor.execute(parsed_query)
+        sql_result = cursor.fetchall()
+        cursor.close()
 
         # Step 3: Generate natural language answer
         final_chain = (
-            RunnablePassthrough.assign(schema=get_schema)
-            .assign(query=lambda x: parsed_query)
-            .assign(response=lambda x: sql_result)
+            RunnablePassthrough.assign(schema=lambda _: current_db["sql_db"].get_table_info())
+            .assign(query=lambda _: parsed_query)
+            .assign(response=lambda _: sql_result)
             | answer_prompt
             | llm
         )
         final_answer = final_chain.invoke({"question": question})
 
-        return jsonify({
-            "answer": final_answer.content,
-            "sql_result": sql_result
-        })
+        return jsonify({"answer": final_answer.content, "sql_result": sql_result})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
