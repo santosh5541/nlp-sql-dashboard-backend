@@ -11,15 +11,17 @@ from langchain_deepseek import ChatDeepSeek
 import mysql.connector
 
 app = Flask(__name__)
-CORS(app)
+# Enable CORS only for your Vercel frontend
+CORS(app, origins=["https://nlp-sql-dashboard.vercel.app"])
 
-# os.environ['DEEPSEEK_API_KEY'] = 'sk-86d752d376a64028929d2511e90dde3b'
+# DEEPSEEK API key
 os.environ['DEEPSEEK_API_KEY'] = os.getenv('DEEPSEEK_API_KEY')
+
 # Store current database connection and info
 current_db = {
     "conn": None,
     "db_info": None,
-    "sql_db": None  # For LangChain schema
+    "sql_db": None
 }
 
 def parse_sql_query(query_text):
