@@ -13,8 +13,8 @@ import mysql.connector
 app = Flask(__name__)
 CORS(app)
 
-os.environ['DEEPSEEK_API_KEY'] = 'sk-86d752d376a64028929d2511e90dde3b'
-
+# os.environ['DEEPSEEK_API_KEY'] = 'sk-86d752d376a64028929d2511e90dde3b'
+os.environ['DEEPSEEK_API_KEY'] = os.getenv('DEEPSEEK_API_KEY')
 # Store current database connection and info
 current_db = {
     "conn": None,
