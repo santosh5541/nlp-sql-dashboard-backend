@@ -59,32 +59,39 @@ answer_prompt = ChatPromptTemplate.from_template(answer_prompt_template)
 def connect_db():
     data = request.json
     host = data.get("host")
+    port = data.get("port")  # dynamic port
     user = data.get("user")
     password = data.get("password")
     database = data.get("database")
 
-    if not all([host, user, password, database]):
-        return jsonify({"error": "All fields are required"}), 400
+    if not all([host, port, user, password, database]):
+        return jsonify({"error": "All fields (host, port, user, password, database) are required"}), 400
 
     try:
+        # For Aiven MySQL, enforce ssl_mode=REQUIRED
+        ssl_mode = "REQUIRED" if "aivencloud.com" in host else None
+
         # MySQL connection
         conn = mysql.connector.connect(
             host=host,
+            port=int(port),
             user=user,
             password=password,
-            database=database
+            database=database,
+            ssl_mode=ssl_mode
         )
         current_db["conn"] = conn
         current_db["db_info"] = data
 
         # URL-encode password for LangChain SQLDatabase
         password_encoded = quote_plus(password)
-        db_uri = f"mysql+mysqlconnector://{user}:{password_encoded}@{host}:3306/{database}"
+        db_uri = f"mysql+mysqlconnector://{user}:{password_encoded}@{host}:{port}/{database}"
         current_db["sql_db"] = SQLDatabase.from_uri(db_uri)
 
         return jsonify({"message": f"Connected to database {database}"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
 
 @app.route("/disconnect", methods=["POST"])
 def disconnect_db():
@@ -140,4 +147,5 @@ def ask():
         return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
-    app.run(port=5000, debug=True)
+    port = int(os.getenv("PORT", 5000))  # Dynamic port for Render
+    app.run(host="0.0.0.0", port=port, debug=True)
